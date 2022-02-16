@@ -69,11 +69,12 @@ dbDisconnect(con)
 Based on my own experience with land/housing/parcel data is that the parcel number tends to serve as the unique identifier for a housing unit, but because of things like subdivisions, duplexes, condos, etc. they often can get messy and don't always work, so let's take a look at that first
 
 ```{r}
-parc_tbl
+head(parc_tbl)
 
 parc_tbl %>% 
   count(parcel_number) %>% 
-  arrange(desc(n))
+  arrange(desc(n)) %>% 
+  slice(1:50)
 ```
 
 So as expected we don't have any duplicate parcel numbers, but let's also check for parcels **missing** a parcel number! 
@@ -105,7 +106,7 @@ Despite being a duplex, the parcel numbers have a different final digit and one 
 
 ```{r}
 parc_tbl %>% 
-  filter(property_class_desc == "RESIDENTIAL CONDOS")
+  filter(property_class_desc == "RESIDENTIAL CONDOS") %>% head()
 
 ```
 
@@ -117,7 +118,8 @@ parc_tbl %>%
   count(use_code_desc) %>% arrange(desc(n))
 parc_tbl %>% 
   filter(property_class_desc == "RESIDENTIAL", 
-         use_code_desc == "DUPLEX")
+         use_code_desc == "DUPLEX") %>% 
+  head()
 ```
 That seems to be the case, but now this makes me realize that some parcels end with a . but if it already contains a . or a - then the number ends in a digit or letter/no trailing .  
 
@@ -126,7 +128,7 @@ That seems to be the case, but now this makes me realize that some parcels end w
 Since I suspect that we can use parcel numbers to identify across tables, let's make sure this stays consistent across tables
 
 ```{r}
-parchist_tbl
+head(parchist_tbl)
 ```
 
 Ok so right away I see a few things that are at issue. First, the var names here are mostly in CAPS (which might be a good way to delineate between current and past parcel data). Numbers seem to still have .s or -s but  now there don't seem to be any trailing .s, let's check. 
@@ -165,19 +167,19 @@ Let's quickly check the rest of the tables for the same thing before we start to
 Now let's look at the sales data
 
 ```{r}
-sales_tbl
+head(sales_tbl)
 ```
 
 Now here we wouldn't expect a 1->1 for parcel numbers since a parcel could be sold multiple times, but we still should check for any outliers with many many many sales 
 
 ```{r}
-sales_tbl %>%  count(parcel_num) %>% arrange(desc(n))
+sales_tbl %>%  count(parcel_num) %>% arrange(desc(n)) %>% slice(1:50)
 ```
 
 Interesting, 860 sales don't have a parcel number associated with them? What's going on there? 
 
 ```{r}
-sales_tbl %>% filter(is.na(parcel_num))
+sales_tbl %>% filter(is.na(parcel_num)) %>% head()
 ```
 Granted, we are talking about `r round(nrow(sales_tbl %>% filter(is.na(parcel_num)))/nrow(sales_tbl), 3)` of all sales, so while we do have sale data that we can't map to a parcel or property, that is only a small portion of the total data. 
 
@@ -194,7 +196,7 @@ Looks good, note the variable name **parcel_num**
 #### Checking assessments parecels 
 
 ```{r}
-assess_tbl
+head(assess_tbl)
 
 assess_tbl %>% filter(PARCELNO == "10008759.")
 
@@ -205,7 +207,7 @@ Looks good, note the variable name **PARCELNO**
 #### Checking blight parcels 
 
 ```{r}
-blight_tbl
+head(blight_tbl)
 
 blight_tbl %>% filter(parcelno == "10008759.")
 parc_tbl %>% filter(parcel_number == "10008759.")
@@ -223,7 +225,7 @@ With that in mind looks good, note the variable name **parcelno**
 
 #### Checking foreclosures parcels
 ```{r}
-fore_tbl 
+head(fore_tbl)
 
 fore_tbl %>% filter(prop_parcelnum == "10008759.")
 ```
@@ -408,8 +410,7 @@ Let's quickly see how much of our current data also has historical data...
 ```{r}
 nrow(parc_tbl)
 
-parc_tbl %>% 
-  filter(parcel_number %in% parchist_tbl$PARCELNO)
+nrow(parc_tbl %>% filter(parcel_number %in% parchist_tbl$PARCELNO))
 
 ```
 
@@ -418,10 +419,9 @@ There are `r nrow(parc_tbl)` current parcels and of that `r nrow(parc_tbl %>% fi
 Now let's do the reverse and see that the historical records largely map to current ones, although we expect more variation here due to subdividing. 
 
 ```{r} 
-parchist_tbl
+nrow(parchist_tbl)
 
-parchist_tbl %>% 
-  filter(PARCELNO %in% parc_tbl$parcel_number)
+nrow(parchist_tbl %>% filter(PARCELNO %in% parc_tbl$parcel_number))
 
 ```
 There are `r nrow(parchist_tbl)` historical parcels and of that `r nrow(parchist_tbl %>% filter(PARCELNO %in% parc_tbl$parcel_number))` have current records, so most of the historical parcels also have current data.
@@ -465,7 +465,8 @@ What this tells us is that the **majority of sales** are not at arms length (thi
 sales_tbl %>%
   count(sale_price) %>%
   mutate(perc = round(n / sum(n), 3)) %>%
-  arrange(desc(perc))
+  arrange(desc(perc)) %>% 
+  slice(1:50)
 ```
 
 So the top sale prices are **0 and 1 dollar** for a total of 30% of all sales. Let's look at the distribution of these 0 and 1 dollar sales over time... 
@@ -489,7 +490,8 @@ Now let's look at the most frequent buyers and sellers, first with sellers (gran
 sales_tbl %>%
   count(grantor) %>%
   mutate(perc = round(n / sum(n), 3)) %>%
-  arrange(desc(perc))
+  arrange(desc(perc)) %>% 
+  slice(1:50)
 ```
 
 So the Wayne Country Treasurer and the Detroit Land Bank were the most common sellers (most likely because they also own/buy the most land), then the sheriff (my guess is seized property). 
@@ -499,7 +501,8 @@ Now let's look at buyers (grantees)
 sales_tbl %>%
   count(grantee) %>%
   mutate(perc = round(n / sum(n), 3)) %>%
-  arrange(desc(perc))
+  arrange(desc(perc)) %>% 
+  slice(1:50)
 ```
 
 As I suspected the Lank Bank authority is the largest buyer of properties, followed by HUD and Fannie Mae, as well as many other public entities. 
@@ -608,7 +611,7 @@ blight_tbl <- blight_tbl %>%
              str_replace("/", "-") %>% 
              ymd()))
 
-blight_tbl
+head(blight_tbl)
 ```
 
 #### Issuing Agency
@@ -630,7 +633,8 @@ Now let's see the city's top offenders!
 blight_tbl %>% 
   count(violator_name, name = "numblight") %>%
   mutate(perc = round(numblight / sum(numblight), 3)) %>% 
-  arrange(desc(numblight))
+  arrange(desc(numblight)) %>% 
+  slice(1:50)
 ```
 
 Interesting that the top offenders include multiple investment companies, the **housing commission**, and family dollar. Let's peak at some of these offense from the housing commission...  
@@ -652,7 +656,8 @@ Let's see besides the obvious (Detroit) of where the violators' mailing addresse
 blight_tbl %>% 
   count(city, name = "numblight") %>%
   mutate(perc = round(numblight / sum(numblight), 3)) %>% 
-  arrange(desc(numblight))
+  arrange(desc(numblight)) %>% 
+  slice(1:50)
 ```
 
 Ok this was less interesting than expected, it's overwhelmingly Detroit or Detroit adjacent, the first major city not in Detroit-metro is Miami. 
@@ -696,7 +701,8 @@ Now while I don't suspect there to be too much to be learned from here (more use
 blight_tbl %>% 
   count(violation_address, name = "numblight") %>%
   mutate(perc = round(numblight / sum(numblight), 3)) %>% 
-  arrange(desc(numblight))
+  arrange(desc(numblight)) %>% 
+  slice(1:50)
 ```
 
 The top two offenders are next to each other along the riverfront, but don't let the frequency of Jefferson addresses deceive you, Jefferson is a major East-West road that runs the length of the city (discontinously at points). As I said previously, this would be more interesting to see mapped then in tabular form. 
@@ -729,7 +735,7 @@ sale_study_data <- left_join(sale_study,
          )%>% 
   select(PIN, SALE_YEAR, SALE_PRICE, ASSESSED_VALUE)
 
-sale_study_data
+head(sale_study_data)
 ```
 
 Now `cmfproperty` is ready for the data
@@ -776,7 +782,7 @@ sales_train <- sales_tbl %>%
   left_join(parc_tbl %>% select(parcel_number, total_square_footage, style), by = c("parcel_num" = "parcel_number")) %>% 
   mutate(sale_year = as.factor(year(sale_date)))
 
-sales_train
+head(sales_train)
 
 sales_lm <- parsnip::linear_reg() %>% 
   parsnip::set_engine("lm") %>% 
@@ -804,7 +810,7 @@ fore_train <- left_join(parc_tbl, sumfore_tbl %>% select(prop_parcelnum, sumfore
 # We want to filter
 
 
-fore_train
+head(fore_train)
 
 fore_lm <- parsnip::linear_reg() %>% 
   parsnip::set_engine("lm") %>% 
