@@ -1,6 +1,6 @@
 ---
 title: "Part 1"
-author: "YOUR NAME"
+author: "Jake da Silva Passos-Hoioos"
 output: 
   html_document:
     code_folding: hide
@@ -9,32 +9,815 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
-library(tidyverse)
-library(lubridate)
-
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+knitr::opts_knit$set(root.dir = '~/GitHub/detroit-jspassoshoioos')
 ```
-
-Template file. Code will be included in folded blocks in the output to facilitate grading. Please knit this file and commit both the rmd and the html output. If you add external files to your analysis, please commit them to the files folder in this repository. NOTE: please do not commit large (15MB+) files to GitHub. Instead please denote the origin of the files in your code. 
 
 ```{r}
-#example connection to database. note that you have to download the database from onedrive
+library(tidyverse)
+library(DBI)
+library(dbplyr)
+library(sf)
+library(lubridate)
+library(Hmisc)
+library(cmfproperty)
 
+'%!in%' <- function(x,y)!('%in%'(x,y))
+```
+
+**Note:** Markdown text from the assignment will be left in *italics* to delineate from my own responses. 
+
+
+*Template file. Code will be included in folded blocks in the output to facilitate grading. Please knit this file and commit both the rmd and the html output. If you add external files to your analysis, please commit them to the files folder in this repository. NOTE: please do not commit large (15MB+) files to GitHub. Instead please denote the origin of the files in your code.* 
+
+# Reading in the Data
+
+Connect to SQLite db provided by prof
+
+```{r}
 con <- DBI::dbConnect(RSQLite::SQLite(), "database/detroit.sqlite")
-
-# sales tbl
-
-dplyr::tbl(con, 'sales')
-
-# convert to tibble
-#dplyr::tbl(con, 'sales') %>% dplyr::collect()
-
-# sql query
-
-dplyr::tbl(con, 'sales') %>% count(year(sale_date))
-
-#dplyr::tbl(con, 'sales') %>% count(year(sale_date)) %>% show_query()
 
 ```
 
+Check tables in db file
+```{r}
+DBI::dbListTables(con)
+```
 
+Save tables as objects so we don't need to maintain db connection 
+```{r} 
+parc_tbl <- dplyr::tbl(con, 'parcels') %>% dplyr::collect()
+parchist_tbl <- dplyr::tbl(con, 'parcels_historic') %>% dplyr::collect()
+sales_tbl <- dplyr::tbl(con, 'sales') %>% dplyr::collect()
+assess_tbl <- dplyr::tbl(con, 'assessments') %>% dplyr::collect()
+blight_tbl <- dplyr::tbl(con, 'blight') %>% dplyr::collect()
+fore_tbl <- dplyr::tbl(con, 'foreclosures') %>% dplyr::collect()
+```
+
+Then disconnect from db
+```{r}
+# Disconnect
+dbDisconnect(con)
+```
+
+# Section A 
+
+*Conduct an exploratory data analysis of homes in Detroit. Offer an overview of relevant trends in the data and data quality issues. Contextualize your analysis with key literature on properties in Detroit.*
+
+## Finding a unique identifier - parcel no.
+
+Based on my own experience with land/housing/parcel data is that the parcel number tends to serve as the unique identifier for a housing unit, but because of things like subdivisions, duplexes, condos, etc. they often can get messy and don't always work, so let's take a look at that first
+
+```{r}
+head(parc_tbl)
+
+parc_tbl %>% 
+  count(parcel_number) %>% 
+  arrange(desc(n)) %>% 
+  slice(1:50)
+```
+
+So as expected we don't have any duplicate parcel numbers, but let's also check for parcels **missing** a parcel number! 
+
+```{r} 
+
+nrow(parc_tbl %>% filter(is.na(parcel_number)))
+
+```
+0 - OK so we are good!
+
+Now let's look back at the parcel numbering using an instance of similar parcel numbers
+
+```{r}
+parc_tbl %>% filter(parcel_number == "22037045.007" | parcel_number == "22037045.008") 
+
+```
+
+Looks like these are nearby/neighboring properties (so probably a subdivisions of the parcel originally numbered 22037045).
+
+Now let's look at this example of a duplex I found on [Google Maps](https://www.google.com/maps/place/15734+Meyers+Rd,+Detroit,+MI+48227/@42.4056081,-83.1695275,3a,46.9y,92.32h,87.36t/data=!3m6!1e1!3m4!1sNMqPyG-qdFONdsXOe0ogmA!2e0!7i16384!8i8192!4m5!3m4!1s0x8824cb8b4cb23247:0x33e10678f6968d99!8m2!3d42.4064434!4d-83.1693176)
+
+```{r}
+parc_tbl %>% filter(address == "15504 MEYERS" |address == "15506 MEYERS") 
+
+```
+
+Despite being a duplex, the parcel numbers have a different final digit and one ends with a . and one ends with a -, so I am not quite sure I understand, let's poke around some more and look at parcels we know are condos:   
+
+```{r}
+parc_tbl %>% 
+  filter(property_class_desc == "RESIDENTIAL CONDOS") %>% head()
+
+```
+
+Ok so condos seem to mostly use decimals off a common parcel number, so -s must be for subdivisions of existing parcels while .s must be for already subdivided parcels such as with condos? Let's double check using duplexes. Since some duplexes are built as such while other are converted, we would expect there to be both .s and -s then. The same should apply to condos.
+
+```{r}
+parc_tbl %>% 
+  filter(property_class_desc == "RESIDENTIAL") %>% 
+  count(use_code_desc) %>% arrange(desc(n))
+parc_tbl %>% 
+  filter(property_class_desc == "RESIDENTIAL", 
+         use_code_desc == "DUPLEX") %>% 
+  head()
+```
+That seems to be the case, but now this makes me realize that some parcels end with a . but if it already contains a . or a - then the number ends in a digit or letter/no trailing .  
+
+### Current vs. historical parcel nos. 
+
+Since I suspect that we can use parcel numbers to identify across tables, let's make sure this stays consistent across tables
+
+```{r}
+head(parchist_tbl)
+```
+
+Ok so right away I see a few things that are at issue. First, the var names here are mostly in CAPS (which might be a good way to delineate between current and past parcel data). Numbers seem to still have .s or -s but  now there don't seem to be any trailing .s, let's check. 
+
+```{r}
+parc_tbl %>% filter(parcel_number == "10008759.")
+parchist_tbl %>% filter(PARCELNO == "10008759")
+
+
+parc_tbl %>% filter(parcel_number == "22037045.007")
+parchist_tbl %>% filter(PROPADDR == "20011 MARK TWAIN")
+```
+
+So the trailing . is dropped, but if it's a decimal like the house on mark twain then the point stays. Now what about for -s? 
+```{r}
+parc_tbl %>% filter(parcel_number == "06005153-4")
+parchist_tbl %>% filter(PARCELNO == "06005153-4")
+```
+
+Ok! So in order to allow for easy comparisons between current and historical data, we should append the historical parcel data to add a trailing . when there's no . already and no -, so that we can refer across tables easily using parcel number. 
+
+```{r}
+parchist_tbl <- parchist_tbl %>% 
+   mutate(PARCELNO =  
+            ifelse(str_detect(PARCELNO, "-"),
+                   PARCELNO,
+                   ifelse(str_detect(PARCELNO, "\\."),
+                          paste0(PARCELNO),
+                          paste0(PARCELNO, "."))))
+```
+
+Let's quickly check the rest of the tables for the same thing before we start to unpack the data. 
+
+#### Checking sales parcels
+
+Now let's look at the sales data
+
+```{r}
+head(sales_tbl)
+```
+
+Now here we wouldn't expect a 1->1 for parcel numbers since a parcel could be sold multiple times, but we still should check for any outliers with many many many sales 
+
+```{r}
+sales_tbl %>%  count(parcel_num) %>% arrange(desc(n)) %>% slice(1:50)
+```
+
+Interesting, 860 sales don't have a parcel number associated with them? What's going on there? 
+
+```{r}
+sales_tbl %>% filter(is.na(parcel_num)) %>% head()
+```
+Granted, we are talking about `r round(nrow(sales_tbl %>% filter(is.na(parcel_num)))/nrow(sales_tbl), 3)` of all sales, so while we do have sale data that we can't map to a parcel or property, that is only a small portion of the total data. 
+
+Now let's check to make sure how parcel numbers are recorded here!
+
+```{r}
+sales_tbl %>% filter(parcel_num == "10008759.")
+
+parc_tbl %>% filter(parcel_number == "10008759.")
+```
+
+Looks good, note the variable name **parcel_num**
+
+#### Checking assessments parecels 
+
+```{r}
+head(assess_tbl)
+
+assess_tbl %>% filter(PARCELNO == "10008759.")
+
+parc_tbl %>% filter(parcel_number == "10008759.")
+```
+Looks good, note the variable name **PARCELNO** 
+
+#### Checking blight parcels 
+
+```{r}
+head(blight_tbl)
+
+blight_tbl %>% filter(parcelno == "10008759.")
+parc_tbl %>% filter(parcel_number == "10008759.")
+```
+
+Weird, at first it seems like there's a mismatch because the street address is right but the owners are different. Let's look back at the sales data... 
+
+```{r}
+sales_tbl %>% filter(parcel_num == "10008759.")
+```
+
+OK the mismatch makes sense since this house has changed hands alot including between the current owner and the owner from the blight data violation. 
+
+With that in mind looks good, note the variable name **parcelno** 
+
+#### Checking foreclosures parcels
+```{r}
+head(fore_tbl)
+
+fore_tbl %>% filter(prop_parcelnum == "10008759.")
+```
+Hmmm, seems like no foreclosures on this property, let's try a known parcel with foreclosures. 
+
+```{r}
+fore_tbl %>% filter(prop_parcelnum == "01000592.")
+parc_tbl %>% filter(parcel_number == "01000592.")
+```
+
+OK so it would seem that if a property isn't in the fore_tbl then it didn't have a foreclosure in that time. Let's check to be sure.
+
+```{r}
+fore_tbl %>% 
+  filter(is.na(`2002`) & 
+         is.na(`2003`) & 
+         is.na(`2004`) & 
+         is.na(`2005`) &  
+         is.na(`2006`) & 
+         is.na(`2007`) & 
+         is.na(`2008`) &
+         is.na(`2009`) & 
+         is.na(`2010`) &
+         is.na(`2011`) & 
+         is.na(`2012`) & 
+         is.na(`2013`) & 
+         is.na(`2014`) & 
+         is.na(`2015`) & 
+         is.na(`2016`) & 
+         is.na(`2017`) &
+         is.na(`2018`) &
+         is.na(`2019`) 
+  )
+```
+
+Just as I thought, not being listed in the fore_tbl means there is no recorded foreclosures for that property b/n '02-'19. 
+With that in mind, this looks good, and note the variable name **prop_parcelnum** 
+
+#### Summary for parcel number 
+
+So for each table, parcel number is: 
+* parc = parcel_number
+* parchist = PARCELNO
+* sales = parcel_num
+* assess = PARCELNO
+* blight = parcelno
+* fore = prop_parcelnum 
+ 
+And now we know the respective names and have the parcel numbers consistent across each table!
+
+## Describing the relationship between tables and units of analysis
+
+So right off the bat, our data is largely concerned with a unit of analysis being roughly a property unit (i.e, a unique parcel no., not necessarily a unique piece of land (see condos, duplexes, etc.)) in a given year. This last part is important because for some of these tables we have multiple rows per parcel no. based on the year. This means some tables provide us with fixed interval snap shots of everything, while others tell stories over time and may not include all parcels if a condition was not met (no complaint, no foreclosure, no sale) for example: 
+
+* in sales and blight, a parcel no. may have multiple lines, each representing a unique sale/complaint that may be in the same or a different year (no limit per year)).
+* in parc, this is current data, so this is reflective of the parcel now in 2022. 
+* in parchist, this is from 2009, so this is reflective of the parvel in 2009. 
+* in foreclosures, each COLUMN details the number of foreclosures in a given year between 2002 and 2019, so here we can have multiple observations for a given parcel, but there still will only be one line (unlike sales, blight or assess)
+* in assess each property SHOULD have 12 lines (11 for 2011 to 2021 + tenative assses.), but some properties might not have existed in previous years (subdivisions) or might be missing data (this is built from FOIA request data so it may be incomplete). 
+   
+Put differently, if we were to think about what one line represents in each we get :
+* parc = one property record (1:1) 
+* parchist = one property record (1:1; newer parcels will be missing)
+* sales = one parcel sale (1:1, Many or None; depends on whether property sold or not, whether sale was recorded, etc.)
+* assess = one parcel's assessment in year X (1:1, Many or None; ideally be 1:12, but newly created  and missing data means this won't always be true)
+* foreclosures = one parcel's foreclosure history (if any) (1:1 or None if no foreclosures)
+* blight = one complaint (usually but not always linked to parcel no) (1:1, Many, or None if no complaints)
+
+## Describing trends in the data (EDA)
+### Parcel table (parc_tbl)
+#### Overview 
+
+Now let's start looking at the actual data and see what we find. To start we should look at the parc_tbl which will give us a snap shot at the current property in Detroit. To start, let's take a look at the variables we have in this table 
+
+```{r}
+str(parc_tbl)
+```
+So it looks like we have address info to start (including city wards), followed by property class/type and property use designation, then whether or not it is subject to tax, then typical house characteristics, sqft, acreage, dimensions, style, year built, if improved, number of structures, assessed and taxed value, and then geo location. 
+
+```{r}
+parc_tbl <- parc_tbl %>% 
+  mutate(
+    across(c(ward, use_code_desc, tax_status, is_improved, style), as.factor))
+```
+
+#### Property class
+
+Let's start with a review of something I've already messed with, property class
+```{r}
+parc_tbl %>% 
+  count(property_class_desc, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(perc))
+```
+So not surprisingly, the main property class is residential, followed by vacant residential. 
+
+It is interesting to see that in the case of **commercial** and **industrial** property that both have a good chunk more number of vacant parcels than unvacant ones, but without looking at the size and other details about these, it's hard to say if that is meaningful. 
+
+What does immediately stand out is the fact that nearly **30%** of parcels in Detroit are **vacant housing.** 
+
+#### Ward
+
+Let's repeat for wards
+
+```{r}
+parc_tbl %>% 
+  count(ward, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(perc))
+```
+
+This would be more interesting/meaningful if I could find more info on Detroit's wards and how they are organized, but I wasn't able to find much online... I'll need to ask in class to see if this is a meaningful boundary classification or if it's just an administrative boundary. 
+
+#### Year built
+
+Let's repeat but this time with year built (essentially telling us how old the buildings of Detroit are)
+
+```{r}
+parc_tbl %>% 
+  count(year_built, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(perc))
+```
+
+A few interesting observations. First, almost 40% is **missing** a year_built. Second of those with a year the top percentages (which granted is only 2%) seem to be clustered around the mid 1920s and 1940s/1950s, which makes sense historically. 
+
+#### "Style" 
+
+There's a variable called style in this table, let's see what that entails... 
+
+```{r} 
+parc_tbl %>% 
+  count(style, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(perc))
+```
+
+Ok so this helps gives us a description of the kind of property it is, but almost 40% of the data is missing a value for this variable. As expected a majority of the properties (which we already knew were residential) are **Single Family Homes** 
+Let's rerun this on the residential class properties to get a sense of the kind of residences Detroit has: 
+
+```{r} 
+parc_tbl %>% 
+  filter(property_class_desc == "RESIDENTIAL") %>% 
+  count(style, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(perc))
+```
+
+So more to the point about single family homes, **85%** of Detroit's residential parcels are SFH, with the next most common being 2 family flats. 
+
+#### Last sale date
+
+I didn't notice this at first since it was the last variable in the set, but there is a sale date value that we should be able to fiddle with using `lubridate` to get a new variable for the year that the parcel was last sold. 
+
+```{r}
+parc_tbl <- parc_tbl %>% 
+  mutate(sale_date = lubridate::as_datetime(sale_date)) %>%
+  mutate(yearsell = lubridate::year(sale_date)) 
+
+parc_tbl %>% 
+  count(yearsell, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(numparc))
+
+```
+
+Knowing that Detroit was hit hard by the 2008-2009 housing market crisis, it comes as no surprise that the years with the greatest number of sales are the years immediately before and after the crisis. When we get to the foreclosure data, we can explore this area more. 
+
+### Historical parcel table (perchist_tbl)
+#### Overview
+Now let's look at the historical parcel table:
+
+```{r}
+str(parchist_tbl)
+```
+So looking here we can see that most the variables are the same as with the current parcel table, although there definitely are some missing. 
+
+#### Comparing historic to current 
+
+Let's quickly see how much of our current data also has historical data... 
+
+```{r}
+nrow(parc_tbl)
+
+nrow(parc_tbl %>% filter(parcel_number %in% parchist_tbl$PARCELNO))
+
+```
+
+There are `r nrow(parc_tbl)` current parcels and of that `r nrow(parc_tbl %>% filter(parcel_number %in% parchist_tbl$PARCELNO))` have historical records, so most of the current parcels also have historical data. 
+
+Now let's do the reverse and see that the historical records largely map to current ones, although we expect more variation here due to subdividing. 
+
+```{r} 
+nrow(parchist_tbl)
+
+nrow(parchist_tbl %>% filter(PARCELNO %in% parc_tbl$parcel_number))
+
+```
+There are `r nrow(parchist_tbl)` historical parcels and of that `r nrow(parchist_tbl %>% filter(PARCELNO %in% parc_tbl$parcel_number))` have current records, so most of the historical parcels also have current data.
+
+### Sales Table (sales_tbl)
+#### Overview
+Now let's look at the sales table:
+
+```{r}
+str(sales_tbl)
+```
+
+For those unfamiliar with real estate lingo, a grantor is the seller and grantee is the buyer. 
+Other important variables include date, price, terms, and economic condition factor, which appears to be an adjustment factor used for property tax assessments to make local adjustments, which I believe functions parallel to Illinois' equalizer factor. Also looks like sale date was read as a character but is already in ymd format.  
+
+```{r}
+sales_tbl <- sales_tbl %>% 
+  mutate(
+    across(c(grantor, grantee, sale_terms, ecf), as.factor), 
+    sale_date = lubridate::as_date(sale_date),
+  )
+```
+
+#### Sale Terms 
+Of these, sale terms is going to be important because it allows us to distinguish foreclosures, no considerations (transfers), bank sales, arms length/not arms length, and the like. 
+
+```{r}
+sales_tbl %>% 
+  count(sale_terms, name = "numparc") %>% 
+  mutate(perc = round((numparc / sum(numparc)), 3)) %>% 
+  arrange(desc(numparc))
+
+```
+
+I am not familiar with what we would expect this distribution to be, but we can see that the most common type of sale is a no consideration sale (i.e., no money exchanged/transfer) sale, followed by exempt/government and then valid arms length sales. 
+
+What this tells us is that the **majority of sales** are not at arms length (thinking of not at arms length sales as any sale  **other** than an arms length sale, not just those classified as not at arms length), which means this will heavily bias our data if we are attempting to extract a regression that accurately predicts fair market sales. 
+
+#### Sale Price 
+```{r} 
+sales_tbl %>%
+  count(sale_price) %>%
+  mutate(perc = round(n / sum(n), 3)) %>%
+  arrange(desc(perc)) %>% 
+  slice(1:50)
+```
+
+So the top sale prices are **0 and 1 dollar** for a total of 30% of all sales. Let's look at the distribution of these 0 and 1 dollar sales over time... 
+
+```{r}
+sales_tbl %>%
+  filter(sale_price %in% c(0, 1)) %>%
+  count(year = year(sale_date)) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = year, y = n)) +
+  geom_col()
+```
+
+There seems to be a spike in 2013 but for the most part they seem fairly uniformly distributed across our 2011 to 2020 time frame. 
+
+#### Buyers and Sellers 
+
+Now let's look at the most frequent buyers and sellers, first with sellers (grantors) 
+
+```{r}
+sales_tbl %>%
+  count(grantor) %>%
+  mutate(perc = round(n / sum(n), 3)) %>%
+  arrange(desc(perc)) %>% 
+  slice(1:50)
+```
+
+So the Wayne Country Treasurer and the Detroit Land Bank were the most common sellers (most likely because they also own/buy the most land), then the sheriff (my guess is seized property). 
+
+Now let's look at buyers (grantees)
+```{r}
+sales_tbl %>%
+  count(grantee) %>%
+  mutate(perc = round(n / sum(n), 3)) %>%
+  arrange(desc(perc)) %>% 
+  slice(1:50)
+```
+
+As I suspected the Lank Bank authority is the largest buyer of properties, followed by HUD and Fannie Mae, as well as many other public entities. 
+
+### Assessments Table(assess_tbl)
+Now let's look at the assessments table, which is looking at the property tax assessed value and the taxable value. 
+
+```{r}
+str(assess_tbl)
+```
+
+This table is fairly narrow, but the number of rows is massive because of the fact that it is time series (2011-2022). We are going to need to cut down this data later for making a model, but for now let's just check it out. 
+
+```{r}
+describe(assess_tbl$year)
+```
+
+My main interest is in comparing the assessed and taxed value. Because of provisions in the tax code that limit or reduce the amount of value that is taxable on a property, I would suspect that the assessed value (in theory should be close to market value) is less than the taxable value (amount actually subject to tax), but what's interesting and got me wondering is **by how much??**
+
+```{r}
+assess_tbl %>% 
+  pivot_longer(cols = c(TAXABLEVALUE, ASSESSEDVALUE)) %>%
+  ggplot() + geom_density(aes(x = log(value), # prices require logging bc of high price outliers 
+                              fill = name),
+                          alpha = .25) + theme_light()
+```
+So as suspected there is some lag of taxable value to assessed value, but overall the gap between the two isn't that dramatic. 
+
+### Foreclosures (fore_tbl)
+Now let's look at the foreclosures table:
+
+```{r}
+str(fore_tbl)
+```
+
+First let's see if we have anything in our foreclosures data that doesn't map to the parcels table...
+
+```{r}
+nrow(fore_tbl)
+
+nrow(fore_tbl %>% filter(prop_parcelnum %in% parc_tbl$parcel_number))
+```
+
+Weird! There's about 250 properties on the foreclosure table that don't map to a parcel, but that's a really small number so not really a problem. Now let's figure out how many of our parcels have foreclosures! 
+
+```{r}
+nrow(parc_tbl %>% filter(parcel_number %in% fore_tbl$prop_parcelnum)) / nrow(parc_tbl)
+```
+
+So 35% of properties have had a foreclosure between 2002 and 2019. Now let's see what that looks like in terms of number of foreclosures per parcel.  
+
+```{r}
+
+sumfore_tbl <- fore_tbl %>%
+  replace_na(list(`2002` = 0, 
+                  `2003` = 0,
+                  `2004` = 0,
+                  `2005` = 0,
+                  `2006` = 0,
+                  `2007` = 0,
+                  `2008` = 0,
+                  `2009` = 0,
+                  `2010` = 0,
+                  `2011` = 0,
+                  `2012` = 0,
+                  `2013` = 0,
+                  `2014` = 0,
+                  `2015` = 0,
+                  `2016` = 0,
+                  `2017` = 0,
+                  `2018` = 0,
+                  `2019` = 0)) %>% 
+  mutate(sumfore = rowSums(across(where(is.numeric)))
+    ) %>%
+  select(prop_addr, prop_parcelnum, sumfore)  
+  
+sumfore_tbl %>% 
+  count(sumfore) %>% 
+  mutate(perc = round(n / sum(n), 3)) %>% 
+  arrange(desc(perc))
+
+```
+
+So as we would expect, most properties only have one foreclosure, with 80% only having one, but nearly 20% have at least 2. Only 1.7% have three or more.  
+
+This will be good data to join together with the parcel data as a simple sum col. 
+
+
+### Blight (blight_tbl)
+Now let's look at the blight table:
+
+```{r}
+str(blight_tbl)
+```
+
+Has a few  date variables where I just need to grab the date using extract and a regex, then replace the /s with -s.  Same for ticket issue time. Also has a good number of interesting things that can be made into factors like issuer (agency_name) and violator (violator_name), violator's city (city), outcome (disposition),  payment_status, and the location of the violation (violation_address). 
+
+```{r}
+
+blight_tbl <- blight_tbl %>%
+  mutate( 
+    across(c(agency_name, violator_name, city, disposition, payment_status, violation_code, violation_address),
+           as.factor), 
+    across(c(violation_date, payment_date), 
+           ~ str_extract(.x, "[0-9]{4}/[0-9]{2}/[0-9]{2}") %>% 
+             str_replace("/", "-") %>% 
+             ymd()))
+
+head(blight_tbl)
+```
+
+#### Issuing Agency
+
+Let's start with who is issuing these violations: 
+
+```{r}
+blight_tbl %>% 
+  count(agency_name, name = "numblight") %>%
+  mutate(perc = round(numblight / sum(numblight), 3)) %>% 
+  arrange(desc(perc))
+```
+
+So as I suspected, most violations are being issued by the building code dept., followed by the enviro dept., and then police.  
+
+#### Violators
+Now let's see the city's top offenders! 
+```{r}
+blight_tbl %>% 
+  count(violator_name, name = "numblight") %>%
+  mutate(perc = round(numblight / sum(numblight), 3)) %>% 
+  arrange(desc(numblight)) %>% 
+  slice(1:50)
+```
+
+Interesting that the top offenders include multiple investment companies, the **housing commission**, and family dollar. Let's peak at some of these offense from the housing commission...  
+
+```{r}
+
+blight_tbl %>% 
+  filter(violator_name == "DETROIT HOUSING COMMISSION")
+
+```
+
+Ok some of these are making more sense since a lot pertain to conditions on the premises, but there's still quite a few compliance code violations that seem like the housing commission shouldn't be having! 
+
+#### City of violators
+
+Let's see besides the obvious (Detroit) of where the violators' mailing addresses are distributed
+
+```{r}
+blight_tbl %>% 
+  count(city, name = "numblight") %>%
+  mutate(perc = round(numblight / sum(numblight), 3)) %>% 
+  arrange(desc(numblight)) %>% 
+  slice(1:50)
+```
+
+Ok this was less interesting than expected, it's overwhelmingly Detroit or Detroit adjacent, the first major city not in Detroit-metro is Miami. 
+
+#### Disposition 
+
+Now let's see the dispersion along the various dispositions
+
+```{r}
+blight_tbl %>% 
+  count(disposition, name = "numblight") %>%
+  mutate(perc = round(numblight / sum(numblight), 3)) %>% 
+  arrange(desc(numblight))
+```
+
+I didn't have any expectations here expect that  the default case (which I am readily guessing is responsible by default) is the most frequent one. 
+
+#### Payment status
+
+Are there a lot of delinquent blight tickets? Or are they mostly paid up? 
+
+```{r}
+blight_pay <- blight_tbl %>% 
+  count(payment_status, name = "numblight") %>%
+  mutate(perc = round(numblight / sum(numblight), 3)) %>% 
+  arrange(desc(numblight))
+
+blight_pay
+
+blight_pay %>% slice(3:5) %>% select(-perc) %>% mutate(perc = round(numblight / sum(numblight), 3)) 
+
+```
+
+So most it seem don't require any payment to begin with (NAs and No Payment Due) and among those that have do, it seems most are paid in full, with some with partial payment and then basically none with no payment. My guess is that NAs here might also be non-payments because I seriously doubt that of all these tickets only 2 are wholly unpaid. 
+
+#### Violation Address
+
+Now while I don't suspect there to be too much to be learned from here (more useful would be a spatial plotting of this but that's for another time), we can see if there are any hotspots for violations, whether at the same address or nearby. 
+
+```{r}
+blight_tbl %>% 
+  count(violation_address, name = "numblight") %>%
+  mutate(perc = round(numblight / sum(numblight), 3)) %>% 
+  arrange(desc(numblight)) %>% 
+  slice(1:50)
+```
+
+The top two offenders are next to each other along the riverfront, but don't let the frequency of Jefferson addresses deceive you, Jefferson is a major East-West road that runs the length of the city (discontinously at points). As I said previously, this would be more interesting to see mapped then in tabular form. 
+
+# Section B 
+
+*Use cmfproperty to conduct a sales ratio study across the relevant time period. Note that cmfproperty is designed to produce Rmarkdown reports but use the documentation and insert relevant graphs/figures into your report. Look to make this reproducible since you’ll need these methods to analyze your assessment model later on. Detroit has many sales which are not arm’s length (sold at fair market value) so some sales should be excluded, but which ones?*
+
+Based on the documentation, `cmfproperty` needs a df input that contains the parcel no., sale year, sale price, and assessed value for input. Based on the ranges of sale and assessment data we have available, the relevant years will be from 2015 to 2019 (2020 is excluded because of the low number of sales + possible effects from COVID). We also should exclude low sale prices since we know many sold for $1 or $0 and we should exclude these, and will use a price of $2,500 (same used in documentation of `cmfproperty`) 
+
+```{r}
+#  preprocessing notes (https://erhla.github.io/cmfproperty/articles/Preprocessing.html)
+
+sale_study <- sales_tbl %>% 
+  select(parcel_num, sale_date, sale_price) %>% 
+  mutate(sale_year = year(sale_date), .keep = "unused") %>% 
+  filter(sale_year > 2014 & sale_year < 2020) %>% 
+  distinct(parcel_num, .keep_all = TRUE) %>% 
+  filter(sale_price > 2500) # from documentation to remove low values. 
+
+sale_study_data <- left_join(sale_study, 
+                             assess_tbl %>% select(PARCELNO, year, ASSESSEDVALUE), 
+                             by = c("parcel_num" = "PARCELNO", 
+                                    "sale_year" = "year")
+                             ) %>% 
+  rename(PIN = parcel_num, 
+         SALE_YEAR = sale_year, 
+         SALE_PRICE = sale_price, 
+         ASSESSED_VALUE = ASSESSEDVALUE
+         )%>% 
+  select(PIN, SALE_YEAR, SALE_PRICE, ASSESSED_VALUE)
+
+head(sale_study_data)
+```
+
+Now `cmfproperty` is ready for the data
+
+```{r} 
+ratios <- 
+  cmfproperty::reformat_data(
+    data = sale_study_data, 
+    sale_col = "SALE_PRICE",
+    assessment_col = "ASSESSED_VALUE",
+    sale_year_col = "SALE_YEAR",
+  )
+
+#cmfproperty::make_report(ratios, jurisdiction_name = "City of Detroit, Michigan")
+```
+
+In addition to the generated report, the documentation for `cmfproperty` provides helpful guidance on assessing the model and its quality. 
+
+```{r}
+head(ratios)
+
+# From the documentation: 
+
+stats <- cmfproperty::calc_iaao_stats(ratios)
+
+stats
+
+output <- diagnostic_plots(stats, 
+                           ratios, 
+                           min_reporting_yr = 2015, 
+                           max_reporting_yr = 2019)
+
+output[[1]]
+
+```
+So there is a marked decline in the number of arms length sales using the `cmfproperty` technique of identifying sales using ratio deciles. Per the documentation, a lower-end cut off of $2,500 was used in the preprocessing of the data to exclude no consideration sales of 0 or 1 dollar, but there are likely other sales that are above this cut off that are still not reflective of the fair market value of the property. 
+
+# Section C
+*Explore trends and relationships with property sales using simple regressions*
+
+```{r}
+sales_train <- sales_tbl %>% 
+  filter(sale_terms == "VALID ARMS LENGTH") %>% 
+  left_join(parc_tbl %>% select(parcel_number, total_square_footage, style), by = c("parcel_num" = "parcel_number")) %>% 
+  mutate(sale_year = as.factor(year(sale_date)))
+
+head(sales_train)
+
+sales_lm <- parsnip::linear_reg() %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::fit(sale_price ~ sale_year + total_square_footage + style, 
+      data = sales_train)
+
+parsnip::tidy(sales_lm)
+```
+
+This regression sees how square footage, parcel style, and sale year impact the sale price of a particular property. As suspected years sale years closer to the 2009 recession experience a negative estimate value, meaning that in these years the sale year had a negative impact (because it was closer to the 2009 recession), with this trend reversing after 2014. 
+
+Given how simple this regression is (and how little preprocessing we've done to account for problems in the data) how much we can interpret from this regression is fairly limited.
+
+# Section D
+*Explore trends and relationships with foreclosures using simple regressions*
+
+Here we will join the foreclosure data to the parcel data to perform our regression, just like we did with the sales data. 
+
+```{r}
+
+fore_train <- left_join(parc_tbl, sumfore_tbl %>% select(prop_parcelnum, sumfore), by = c("parcel_number" = "prop_parcelnum")) %>% 
+  filter(!is.na(sumfore)) %>% 
+  mutate(sale_year = as.factor(year(sale_date)))
+
+# We want to filter
+
+
+head(fore_train)
+
+fore_lm <- parsnip::linear_reg() %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::fit(sumfore ~ total_square_footage + style, 
+               data = fore_train)
+
+parsnip::tidy(fore_lm) %>% arrange(estimate)
+```
+
+This model is now using traits about each property to predict the number of foreclosures a property experienced between 2002 and 2019. Using a model of just style and square footage to predict the number of foreclosures, we see that square footage acts as a very small positive factor on foreclosures (meaning bigger properties were more likely to be foreclosed), and various styles either positively or negatively predicted foreclosures. For example, if a property was an elementary school then the style negatively affected foreclsoures (meaning it was less likely to be foreclosed), while movie theaters were the most positively affected (more likely to be foreclose)
